@@ -15,8 +15,11 @@
 bash run.sh
 ```
 
-This script calls `plt.plot()`, so the output is a window containing the graph. To recompile the report, run:
+This script calls `plt.plot()`, so the output is a window containing the graph. 
+
+To recompile the report, run:
 
 ```bash
+cd pdf
 pandoc report.md -o Assgn1-Report-cs21btech11001.pdf
 ```

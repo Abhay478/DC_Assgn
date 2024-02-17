@@ -68,14 +68,19 @@ Wrapper around a vector of `LogEntry` objects. Contains all the logging informat
 
 # Files
 
-- `structs.cpp`: Main file. Contains the implementation of both algorithms. Due to inheritance and templates, it was much cleaner to write both in one file.
-- `VC-cs21btech11001.cpp`: Contains the `main` function for the VC algorithm.
-- `SK-cs21btech11001.cpp`: Contains the `main` function for the SK algorithm.
+- `src/`
+  - `structs.cpp`: Main file. Contains the implementation of both algorithms. Due to inheritance and templates, it was much cleaner to write both in one file.
+  - `VC-cs21btech11001.cpp`: Contains the `main` function for the VC algorithm.
+  - `SK-cs21btech11001.cpp`: Contains the `main` function for the SK algorithm.
 - `inp-params.txt`: Input file.
 - `plot.py`: Python script to plot the graph.
-- `report.md`, `Assgn1-Report-cs21btech11001.pdf`: Report files.
 - `run.sh`: Script to compile and run the programs.
-- Various output and log files.
+- `pdf/`
+  - `report.md`: This file.
+  - `Assgn1-Report-cs21btech11001.pdf`: Report file.
+- `out/`; Created by running `run.sh`
+  - Binaries
+  - Log files: All times in microseconds.
 
 # Program Flow
 
@@ -92,7 +97,7 @@ Wrapper around a vector of `LogEntry` objects. Contains all the logging informat
 
 ![Plot](plot.png)
 
-As expected, the SK differential technique greatly reduces the message size.
+As expected, the SK differential technique greatly reduces the message size. 
 
 The space complexity of each thread is higher, as it needs to store the `ls` and `lu` arrays also. The space required per thread (in bytes) is:  
 

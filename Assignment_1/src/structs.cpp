@@ -26,7 +26,7 @@ string get_addr(int i) {
 chrono::system_clock::time_point init;
 
 chrono::system_clock::duration get_time() {
-    return (chrono::system_clock::now() - init) / 1000000;
+    return (chrono::system_clock::now() - init) / 1000;
 }
 
 // Signal handling for debugging
