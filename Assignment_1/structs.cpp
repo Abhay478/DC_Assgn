@@ -120,6 +120,15 @@ struct Params {
     }
 };
 
+struct Message {
+    // int * v;
+    // int size;
+    vector<int> v;
+    int sender;
+    int recvr;
+    Message(vector<int> &v, int s, int r) : v(v), sender(s), recvr(r) {}
+};
+
 // Graph node
 struct Node {
     int node_id;
