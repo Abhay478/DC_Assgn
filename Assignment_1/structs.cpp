@@ -50,14 +50,28 @@ struct LogEntry {
     vector<int> clock;
     int space;
     int tid;
-    LogEntry(vector<int> clock, chrono::system_clock::duration time, string event, int space, int tid) : time(time), event(event), clock(clock), space(space), tid(tid) {}
+    int other_id;
+    LogEntry(vector<int> clock, chrono::system_clock::duration time, string event, int space, int tid, int other_id) 
+    : time(time), event(event), clock(clock), tid(tid), space(space), other_id(other_id) {}
 
     void print(fstream &f) {
-        f << "Process " << tid << " " << event << " at " << time.count() << " with clock: ";
-        for(auto &c : clock) {
-            f << c << " ";
+        if(event == "tick") {
+            f << "Process" << tid << " executes internal event e" << tid << "_" << clock[tid] << " at " << time.count() << ", vc: [";
+        } else if (event == "send") {
+            f << "Process" << tid << " sends message m" << tid << "_" << other_id << " to process" << other_id << " at " << time.count() << ", vc: [";
+        } else if (event == "recv") {
+            f << "Process" << tid << " receives message m" << other_id << "_" << tid << " from process" << other_id << " at " << time.count() << ", vc: [";
+        } else if (event == "term_send") {
+            f << "Process" << tid << " sends termination message m" << tid << "_" << other_id << " to process" << other_id << " at " << time.count() << ", vc: [";
+        } else if (event == "term_recv") {
+            f << "Process" << tid << " receives termination message m" << other_id << "_" << tid << " from process" << other_id << " at " << time.count() << ", vc: [";
         }
-        f << endl;
+        for(auto &c : clock) {
+            f << c << ", ";
+        }
+        f << "]" << endl;
+        // f << "Process " << tid << " " << event << " at " << time.count() << " with clock: ";
+        
     }
 };
 
@@ -67,8 +81,8 @@ struct Log {
     int tid;
     vector<LogEntry *> entries;
     Log(int tid) : tid(tid) {}
-    void log(vector<int> &clock, chrono::system_clock::duration time, string event, int space = 0) {
-        entries.push_back(new LogEntry(clock, time, event, space, tid));
+    void log(vector<int> &clock, chrono::system_clock::duration time, string event, int space = 0, int other = -1) {
+        entries.push_back(new LogEntry(clock, time, event, space, tid, other));
     }
 
     int msg_space() {
@@ -109,13 +123,13 @@ struct Params {
 // Graph node
 struct Node {
     int node_id;
-    vector<zmq::socket_t *> socks;
+    vector<pair<int, zmq::socket_t *>> socks;
     zmq::socket_t * recvr;
     vector<int> vtime;
     uniform_int_distribution<> dist;
 
     Node(int n, zmq::context_t &ctx, int node_id) : node_id(node_id) {
-        socks = vector<zmq::socket_t *>();
+        socks = vector<pair<int, zmq::socket_t *>>();
         recvr = new zmq::socket_t(ctx, ZMQ_ROUTER);
         recvr->bind(get_addr(node_id));
         vtime = vector<int>(n, 0);
@@ -126,19 +140,25 @@ struct Node {
     }
 
     virtual void recv_handler(Log * log, zmq::message_t &msg, int tid) {
-        log->log(vtime, get_time(), "recv");
-        // Rule 2.
         int * v = (int *)msg.data();
-        for(size_t i = 0; i < msg.size() / sizeof(int); i++) {
+        log->log(vtime, get_time(), "recv", 0, v[msg.size() / sizeof(int) - 1]);
+        // Rule 2.
+        for(size_t i = 0; i < msg.size() / sizeof(int) - 1; i++) {
             vtime[i] = max(vtime[i], v[i]);
         }
     }
 
     virtual void send_handler(Log * log, int tid) {
-        int space = vtime.size() * sizeof(int);
-        log->log(vtime, get_time(), "send", space);
+        int u = dist(gen);
+        // vector<int> vtime_copy(vtime);
+        // vtime_copy.insert(vtime_copy.begin(), tid);
         // Send to random neighbour
-        socks[dist(gen)]->send(zmq::buffer({vtime.data(), }, space));
+        vtime.push_back(tid);
+        int space = vtime.size() * sizeof(int);
+
+        socks[u].second->send(zmq::buffer(vtime.data(), space));
+        vtime.pop_back();
+        log->log(vtime, get_time(), "send", space, socks[u].first);
     }
 
     Log * thread_fn(int tid, Params &params) {
@@ -172,7 +192,7 @@ struct Node {
 
         // Termination
         for(auto s: socks) {
-            s->send(zmq::str_buffer(""), zmq::send_flags::none);
+            s.second->send(zmq::str_buffer(""), zmq::send_flags::none);
             log->log(vtime, get_time(), "term_send");
             // vtime[tid]++;
             // Not a clocked event. Since we're not sending vector clocks in the message, we cannot increment the clock.
@@ -203,11 +223,12 @@ struct SKNode : public Node {
     SKNode(int n, zmq::context_t &ctx, int node_id) : Node(n, ctx, node_id), ls(n, 0), lu(n, 0) {}
 
     void recv_handler(Log * log, zmq::message_t &msg, int tid) override {
-        log->log(vtime, get_time(), "recv");
         // Rule 2.
         pair<int, int> * v = (pair<int, int> *)msg.data();
         vector<pair<int, int>> vec(v, v + msg.size() / sizeof(pair<int, int>));
-
+        auto u = vec.back();
+        log->log(vtime, get_time(), "recv", 0, u.first);
+        vec.pop_back();
         // Algorithm
         for (auto &p : vec) {
             if(vtime[p.first] < p.second) {
@@ -227,9 +248,10 @@ struct SKNode : public Node {
                 yeet.push_back(make_pair(j, vtime[j]));
             }
         }
+        yeet.push_back(make_pair(tid, 0));
         int space = yeet.size() * sizeof(pair<int, int>);
-        log->log(vtime, get_time(), "send", space);
-        socks[rec]->send(zmq::buffer(yeet.data(), space));
+        log->log(vtime, get_time(), "send", space, socks[rec].first);
+        socks[rec].second->send(zmq::buffer(yeet.data(), space));
         ls[rec] = vtime[tid];
     }
 
@@ -265,6 +287,7 @@ struct Graph {
     zmq::context_t zmq_ctx;
 
     Graph(fstream &f, int n) {
+        // static_assert(std::is_base_of<Node, T>::value, "T must inherit from Node");
         zmq_ctx = zmq::context_t(1);
         // nodes.reserve(n);
         for(int i = 0; i < n; i++) {
@@ -284,8 +307,8 @@ struct Graph {
                 if (i < j) {
                     auto sock_pair = get_pair(&zmq_ctx, i - 1, j - 1);
 
-                    nodes[i - 1].socks.push_back(sock_pair.first);
-                    nodes[j - 1].socks.push_back(sock_pair.second);
+                    nodes[i - 1].socks.push_back({j - 1, sock_pair.first});
+                    nodes[j - 1].socks.push_back({i - 1, sock_pair.second});
                 }
             }
         }

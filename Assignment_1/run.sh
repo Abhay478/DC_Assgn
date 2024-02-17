@@ -1,5 +1,5 @@
-g++ -std=c++17 -O3 VC-cs21btech11001.cpp -lzmq -o VC
-g++ -std=c++17 -O3 SK-cs21btech11001.cpp -lzmq -o SK
+g++ -std=c++17 -O3 -g VC-cs21btech11001.cpp -lzmq -o VC
+g++ -std=c++17 -O3 -g SK-cs21btech11001.cpp -lzmq -o SK
 for t in {10..15}; do
 echo $t 5 1.5 50 > inp-params.txt
     declare -i m=$t-1
