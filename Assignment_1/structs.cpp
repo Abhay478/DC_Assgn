@@ -26,7 +26,7 @@ string get_addr(int i) {
 chrono::system_clock::time_point init;
 
 chrono::system_clock::duration get_time() {
-    return chrono::system_clock::now() - init;
+    return (chrono::system_clock::now() - init) / 1000000;
 }
 
 // Signal handling for debugging
@@ -62,9 +62,9 @@ struct LogEntry {
         } else if (event == "recv") {
             f << "Process" << tid << " receives message m" << other_id << "_" << tid << " from process" << other_id << " at " << time.count() << ", vc: [";
         } else if (event == "term_send") {
-            f << "Process" << tid << " sends termination message m" << tid << "_" << other_id << " to process" << other_id << " at " << time.count() << ", vc: [";
+            f << "Process" << tid << " sends termination message to process" << other_id << " at " << time.count() << ", vc: [";
         } else if (event == "term_recv") {
-            f << "Process" << tid << " receives termination message m" << other_id << "_" << tid << " from process" << other_id << " at " << time.count() << ", vc: [";
+            f << "Process" << tid << " receives termination message at " << time.count() << ", vc: [";
         }
         for(auto &c : clock) {
             f << c << ", ";
@@ -120,15 +120,6 @@ struct Params {
     }
 };
 
-struct Message {
-    // int * v;
-    // int size;
-    vector<int> v;
-    int sender;
-    int recvr;
-    Message(vector<int> &v, int s, int r) : v(v), sender(s), recvr(r) {}
-};
-
 // Graph node
 struct Node {
     int node_id;
@@ -139,7 +130,7 @@ struct Node {
 
     Node(int n, zmq::context_t &ctx, int node_id) : node_id(node_id) {
         socks = vector<pair<int, zmq::socket_t *>>();
-        recvr = new zmq::socket_t(ctx, ZMQ_ROUTER);
+        recvr = new zmq::socket_t(ctx, ZMQ_PULL);
         recvr->bind(get_addr(node_id));
         vtime = vector<int>(n, 0);
     }
@@ -153,7 +144,7 @@ struct Node {
         log->log(vtime, get_time(), "recv", 0, v[msg.size() / sizeof(int) - 1]);
         // Rule 2.
         for(size_t i = 0; i < msg.size() / sizeof(int) - 1; i++) {
-            vtime[i] = max(vtime[i], v[i]);
+            if(i != tid) vtime[i] = max(vtime[i], v[i]);
         }
     }
 
@@ -164,8 +155,9 @@ struct Node {
         // Send to random neighbour
         vtime.push_back(tid);
         int space = vtime.size() * sizeof(int);
-
-        socks[u].second->send(zmq::buffer(vtime.data(), space));
+        zmq::message_t msg(space);
+        memcpy(msg.data(), vtime.data(), space);
+        socks[u].second->send(msg, zmq::send_flags::none);
         vtime.pop_back();
         log->log(vtime, get_time(), "send", space, socks[u].first);
     }
@@ -189,6 +181,7 @@ struct Node {
                     continue;
                 }
                 this->recv_handler(log, msg, tid);
+                msg.rebuild();
             } else if(params.bern(gen)) { // Send event?
                 this->send_handler(log, tid);
                 i++;
@@ -202,7 +195,7 @@ struct Node {
         // Termination
         for(auto s: socks) {
             s.second->send(zmq::str_buffer(""), zmq::send_flags::none);
-            log->log(vtime, get_time(), "term_send");
+            log->log(vtime, get_time(), "term_send", 0, s.first);
             // vtime[tid]++;
             // Not a clocked event. Since we're not sending vector clocks in the message, we cannot increment the clock.
         }
@@ -234,9 +227,7 @@ struct SKNode : public Node {
 
     void recv_handler(Log * log, zmq::message_t &msg, int tid) override {
         // Rule 2.
-        cout << msg.size() << endl;
         pair<int, int> * v = (pair<int, int> *)msg.data();
-        cout << msg.size() << endl;
         log->log(vtime, get_time(), "recv", 0, v[msg.size() / sizeof(pair<int, int>) - 1].first);
         for(size_t i = 0; i < msg.size() / sizeof(pair<int, int>) - 1; i++) {
             if(vtime[v[i].first] < v[i].second) {
@@ -244,17 +235,6 @@ struct SKNode : public Node {
                 lu[v[i].first] = vtime[tid];
             }
         }
-        // vector<pair<int, int>> vec(v, v + msg.size() / sizeof(pair<int, int>));
-        // auto u = vec.back();
-        // log->log(vtime, get_time(), "recv", 0, u.first);
-        // vec.pop_back();
-        // // Algorithm
-        // for (auto &p : vec) {
-        //     if(vtime[p.first] < p.second) {
-        //         vtime[p.first] = p.second;
-        //         lu[p.first] = vtime[tid];
-        //     }
-        // }
     }
 
     void send_handler(Log * log, int tid) override {
@@ -269,7 +249,6 @@ struct SKNode : public Node {
         }
         last_yeet.push_back(make_pair(tid, 0));
         int space = last_yeet.size() * sizeof(pair<int, int>);
-        // cout << space << endl;
         log->log(vtime, get_time(), "send", space, socks[rec].first);
         socks[rec].second->send(zmq::buffer(last_yeet.data(), space));
         ls[rec] = vtime[tid];
@@ -280,8 +259,6 @@ struct SKNode : public Node {
 
 // Initialise sockets for a pair of nodes
 pair<zmq::socket_t *, zmq::socket_t *> get_pair(zmq::context_t *ctx, int i, int j) {
-    // string stub = "inproc://pair_";
-    // return make_pair(stub + to_string(i) + "_" + to_string(j), stub + to_string(j) + "_" + to_string(i));
     string s1 = get_addr(i);
     string s2 = get_addr(j);
 
