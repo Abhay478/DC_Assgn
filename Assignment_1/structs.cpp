@@ -229,38 +229,49 @@ struct Node {
 struct SKNode : public Node {
     vector<int> ls;
     vector<int> lu;
+    vector<pair<int, int>> last_yeet;
     SKNode(int n, zmq::context_t &ctx, int node_id) : Node(n, ctx, node_id), ls(n, 0), lu(n, 0) {}
 
     void recv_handler(Log * log, zmq::message_t &msg, int tid) override {
         // Rule 2.
+        cout << msg.size() << endl;
         pair<int, int> * v = (pair<int, int> *)msg.data();
-        vector<pair<int, int>> vec(v, v + msg.size() / sizeof(pair<int, int>));
-        auto u = vec.back();
-        log->log(vtime, get_time(), "recv", 0, u.first);
-        vec.pop_back();
-        // Algorithm
-        for (auto &p : vec) {
-            if(vtime[p.first] < p.second) {
-                vtime[p.first] = p.second;
-                lu[p.first] = vtime[tid];
+        cout << msg.size() << endl;
+        log->log(vtime, get_time(), "recv", 0, v[msg.size() / sizeof(pair<int, int>) - 1].first);
+        for(size_t i = 0; i < msg.size() / sizeof(pair<int, int>) - 1; i++) {
+            if(vtime[v[i].first] < v[i].second) {
+                vtime[v[i].first] = v[i].second;
+                lu[v[i].first] = vtime[tid];
             }
         }
+        // vector<pair<int, int>> vec(v, v + msg.size() / sizeof(pair<int, int>));
+        // auto u = vec.back();
+        // log->log(vtime, get_time(), "recv", 0, u.first);
+        // vec.pop_back();
+        // // Algorithm
+        // for (auto &p : vec) {
+        //     if(vtime[p.first] < p.second) {
+        //         vtime[p.first] = p.second;
+        //         lu[p.first] = vtime[tid];
+        //     }
+        // }
     }
 
     void send_handler(Log * log, int tid) override {
-        auto yeet = vector<pair<int, int>>();
+        last_yeet = vector<pair<int, int>>();
         int rec = this->dist(gen);
 
         // Deltas
         for(size_t j = 0; j < vtime.size(); j++) {
             if(lu[j] >= ls[rec]) {
-                yeet.push_back(make_pair(j, vtime[j]));
+                last_yeet.push_back(make_pair(j, vtime[j]));
             }
         }
-        yeet.push_back(make_pair(tid, 0));
-        int space = yeet.size() * sizeof(pair<int, int>);
+        last_yeet.push_back(make_pair(tid, 0));
+        int space = last_yeet.size() * sizeof(pair<int, int>);
+        // cout << space << endl;
         log->log(vtime, get_time(), "send", space, socks[rec].first);
-        socks[rec].second->send(zmq::buffer(yeet.data(), space));
+        socks[rec].second->send(zmq::buffer(last_yeet.data(), space));
         ls[rec] = vtime[tid];
     }
 
