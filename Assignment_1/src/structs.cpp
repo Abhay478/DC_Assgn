@@ -20,7 +20,7 @@ std::mt19937 gen(rd());
 
 
 string get_addr(int i) {
-    return "inproc://sock" + to_string(i + 5550); // magic
+    return "tcp://*:sock" + to_string(i + 5550); // magic
 }
 
 chrono::system_clock::time_point init;
@@ -242,6 +242,7 @@ struct SKNode : public Node {
         int rec = this->dist(gen);
 
         // Deltas
+        lu[tid] = vtime[tid];
         for(size_t j = 0; j < vtime.size(); j++) {
             if(lu[j] >= ls[rec]) {
                 last_yeet.push_back(make_pair(j, vtime[j]));
@@ -251,7 +252,7 @@ struct SKNode : public Node {
         int space = last_yeet.size() * sizeof(pair<int, int>);
         log->log(vtime, get_time(), "send", space, socks[rec].first);
         socks[rec].second->send(zmq::buffer(last_yeet.data(), space));
-        ls[rec] = vtime[tid];
+        ls[socks[rec].first] = vtime[tid];
     }
 
     // Inherits a bunch of other functions.
