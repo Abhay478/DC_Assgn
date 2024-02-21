@@ -20,7 +20,7 @@ std::mt19937 gen(rd());
 
 
 string get_addr(int i) {
-    return "tcp://*:sock" + to_string(i + 5550); // magic
+    return "tcp://127.0.0.1:" + to_string(i + 5550); // magic
 }
 
 chrono::system_clock::time_point init;

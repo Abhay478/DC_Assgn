@@ -2,7 +2,7 @@
 
 int main() {
     // signal(SIGABRT, handle);
-    // signal(SIGSEGV, handle);
+    signal(SIGINT, handle);
     Context<Node> * ctx = new Context<Node>("inp-params.txt", "out/vc-out.txt");
     init = chrono::system_clock::now();
     ctx->thread_spawn();

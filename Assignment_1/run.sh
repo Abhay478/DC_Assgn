@@ -8,7 +8,7 @@ echo $t 5 1.5 50 > inp-params.txt
         declare -i q=$j+1
         echo $j $q >> inp-params.txt
     done
-    echo $t 1 >> inp-params.txt
+    echo 1 $t >> inp-params.txt
 
     out/VC >> vc.csv
     out/SK >> sk.csv
