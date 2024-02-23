@@ -18,9 +18,11 @@ using namespace std;
 std::random_device rd;
 std::mt19937 gen(rd());
 
+string ip;
 
 string get_addr(int i) {
-    return "tcp://127.0.0.1:" + to_string(i + 5550); // magic
+    return "tcp://" + ip + ":" + to_string(i + 5550); // magic
+    // return "inproc://" + to_string(i + 5550);
 }
 
 chrono::system_clock::time_point init;
@@ -54,7 +56,7 @@ struct LogEntry {
     LogEntry(vector<int> clock, chrono::system_clock::duration time, string event, int space, int tid, int other_id) 
     : time(time), event(event), clock(clock), tid(tid), space(space), other_id(other_id) {}
 
-    void print(fstream &f) {
+    void print(ostream &f) {
         if(event == "tick") {
             f << "Process" << tid << " executes internal event e" << tid << "_" << clock[tid] << " at " << time.count() << ", vc: [";
         } else if (event == "send") {
@@ -96,7 +98,7 @@ struct Log {
     }
     
 
-    void print(fstream &f) {
+    void print(ostream &f) {
         for(auto &e : entries) {
             e->print(f);
         }
@@ -106,8 +108,6 @@ struct Log {
 // Input parameters
 struct Params {
     int n;
-    // int l;
-    // int a;
     exponential_distribution<> exp;
     bernoulli_distribution bern;
     int m;
@@ -181,9 +181,10 @@ struct Node {
                     continue;
                 }
                 this->recv_handler(log, msg, tid);
-                msg.rebuild();
+                // msg.rebuild();
             } else if(params.bern(gen)) { // Send event?
                 this->send_handler(log, tid);
+                // cerr << "Send." << endl;
                 i++;
             } else {
                 log->log(vtime, get_time(), "tick");
@@ -191,7 +192,6 @@ struct Node {
             // Normie event. Only rule 1.
             vtime[tid]++;
         }
-
         // Termination
         for(auto s: socks) {
             s.second->send(zmq::str_buffer(""), zmq::send_flags::none);
@@ -222,7 +222,6 @@ struct Node {
 struct SKNode : public Node {
     vector<int> ls;
     vector<int> lu;
-    vector<pair<int, int>> last_yeet;
     SKNode(int n, zmq::context_t &ctx, int node_id) : Node(n, ctx, node_id), ls(n, 0), lu(n, 0) {}
 
     void recv_handler(Log * log, zmq::message_t &msg, int tid) override {
@@ -238,20 +237,20 @@ struct SKNode : public Node {
     }
 
     void send_handler(Log * log, int tid) override {
-        last_yeet = vector<pair<int, int>>();
-        int rec = this->dist(gen);
+        vector<pair<int, int>> yeet;
+        int rec = this->dist(gen); // Neighbour index, not node id.
 
         // Deltas
         lu[tid] = vtime[tid];
         for(size_t j = 0; j < vtime.size(); j++) {
-            if(lu[j] >= ls[rec]) {
-                last_yeet.push_back(make_pair(j, vtime[j]));
+            if(lu[j] >= ls[socks[rec].first]) { // node id
+                yeet.push_back(make_pair(j, vtime[j]));
             }
         }
-        last_yeet.push_back(make_pair(tid, 0));
-        int space = last_yeet.size() * sizeof(pair<int, int>);
+        yeet.push_back(make_pair(tid, 0));
+        int space = yeet.size() * sizeof(pair<int, int>);
         log->log(vtime, get_time(), "send", space, socks[rec].first);
-        socks[rec].second->send(zmq::buffer(last_yeet.data(), space));
+        socks[rec].second->send(zmq::buffer(yeet.data(), space));
         ls[socks[rec].first] = vtime[tid];
     }
 
@@ -263,7 +262,7 @@ pair<zmq::socket_t *, zmq::socket_t *> get_pair(zmq::context_t *ctx, int i, int 
     string s1 = get_addr(i);
     string s2 = get_addr(j);
 
-    auto out = make_pair(new zmq::socket_t(*ctx, ZMQ_PAIR), new zmq::socket_t(*ctx, ZMQ_PAIR));
+    auto out = make_pair(new zmq::socket_t(*ctx, ZMQ_PUSH), new zmq::socket_t(*ctx, ZMQ_PUSH));
     out.first->connect(s2);
     out.second->connect(s1);
     return out;
@@ -302,12 +301,13 @@ struct Graph {
             ss >> i;
             int j;
             while(ss >> j) {
-                if (i < j) {
-                    auto sock_pair = get_pair(&zmq_ctx, i - 1, j - 1);
-
-                    nodes[i - 1].socks.push_back({j - 1, sock_pair.first});
-                    nodes[j - 1].socks.push_back({i - 1, sock_pair.second});
-                }
+                // i can send to j
+                string addr = get_addr(j - 1);
+                // cerr << addr << endl;
+                zmq::socket_t * new_sock = new zmq::socket_t(zmq_ctx, ZMQ_PUSH);
+                new_sock->connect(addr);
+                nodes[i - 1].socks.push_back({j - 1, new_sock});
+                // cerr << "Connected " << i << " to " << j << endl;
             }
         }
 

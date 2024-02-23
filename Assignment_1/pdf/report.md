@@ -92,6 +92,9 @@ Wrapper around a vector of `LogEntry` objects. Contains all the logging informat
    2. The `thread_fn` method is the business logic for each node. It calls the `recv_handler` and `send_handler` methods, and logs the events.
    3. The thread returns a pointer to the `Log` object, which is collected by the `Graph::thread_spawn` method.
 
+# Topology
+
+The topology (read from the input file) is a bidirectional ring graph, so that the graph is strongly connected.
 
 # Graph
 
