@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 fn main() {
     let params = Params::new();
-    let ips = get_ips();
+    let (ips, _) = get_ips();
     let id = (
         env::args().nth(1).unwrap().parse().unwrap(),
         env::args().nth(2).unwrap().parse().unwrap(),

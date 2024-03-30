@@ -40,7 +40,7 @@ impl Params {
                 Region::Out => self.out_l,
                 Region::In => self.in_l,
             } as f64;
-        thread::sleep(Duration::from_micros(ts as u64));
+        thread::sleep(Duration::from_millis(ts as u64));
     }
 }
 

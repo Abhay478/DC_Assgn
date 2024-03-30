@@ -1,29 +1,58 @@
 use std::{
     collections::HashMap,
+    fmt::Display,
     fs::File,
     io::Read,
     mem,
     net::{SocketAddr, TcpStream},
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
+
+use either::Either::{self, Left, Right};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
     Internal,
 
-    Query((u64, u64)),
-    Request((u64, u64)),
+    Query(Either<(u64, u64), u128>),
+    Request(Either<(u64, u64), u128>),
 
-    Grant((u64, u64)),
-    Reply((u64, u64)),
+    Grant(Either<(u64, u64), u128>),
+    Reply(Either<(u64, u64), u128>),
 
     Acquire,
 
-    Release((u64, u64)),
+    Release(Either<(u64, u64), u128>),
     Exit,
 
     Terminate,
+}
+
+impl Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Action::Internal => write!(f, "executed an internal action"),
+
+            Action::Query(Left(x)) => write!(f, "received request from Process {:?}", x),
+            Action::Query(Right(x)) => write!(f, "received request from Process {}", x),
+            Action::Request(Left(x)) => write!(f, "sent request to process {:?}", x),
+            Action::Request(Right(x)) => write!(f, "sent request to process {}", x),
+
+            Action::Grant(Left(x)) => write!(f, "sent reply to Process {:?}", x),
+            Action::Grant(Right(x)) => write!(f, "sent reply to Process {}", x),
+            Action::Reply(Left(x)) => write!(f, "received reply from Process {:?}", x),
+            Action::Reply(Right(x)) => write!(f, "received reply from Process {}", x),
+
+            Action::Acquire => write!(f, "acquired the CS"),
+
+            Action::Release(Left(x)) => write!(f, "received release from process {:?}", x),
+            Action::Release(Right(x)) => write!(f, "received release from process {}", x),
+
+            Action::Exit => write!(f, "exited the critical section"),
+
+            Action::Terminate => write!(f, "terminated"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -38,14 +67,33 @@ pub enum MessageType {
 }
 #[derive(Debug, Clone)]
 pub struct Message {
-    pub id: (u64, u64),
+    pub id: Either<(u64, u64), u128>,
     pub typ: MessageType,
     pub ts: u128,
 }
 
 impl Message {
-    pub fn new(id: (u64, u64), typ: MessageType, ts: u128) -> Self {
-        Self { id, typ, ts }
+    pub fn new_maekawa(id: (u64, u64), typ: MessageType, ts: u128) -> Self {
+        Self {
+            id: Left(id),
+            typ,
+            ts,
+        }
+    }
+
+    pub fn new_rc(id: u128, typ: MessageType, ts: u128) -> Self {
+        Self {
+            id: Right(id),
+            typ,
+            ts,
+        }
+    }
+
+    pub fn flip(&mut self) {
+        self.id = match self.id {
+            Left(x) => Right(unsafe { mem::transmute(x) }),
+            Right(x) => Left(unsafe { mem::transmute(x) }),
+        };
     }
 }
 
@@ -88,25 +136,45 @@ impl From<&[u8]> for Message {
             7 => MessageType::Terminate,
             _ => unreachable!(),
         };
-        Self { id, typ, ts }
+        Self {
+            id: Left(id),
+            typ,
+            ts,
+        }
     }
 }
 
 /// Logging unit
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub pid: (u64, u64),
+    pub pid: Either<(u64, u64), u128>,
     pub ts: Instant,
     pub act: Action,
 }
 
-pub fn get_ips() -> HashMap<(u64, u64), SocketAddr> {
+impl Display for LogEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pid = match self.pid {
+            Left(x) => format!("{:?}", x),
+            Right(x) => format!("{:?}", x),
+        };
+        write!(
+            f,
+            "Process {:?} {} at time {:?}",
+            pid,
+            self.act,
+            self.ts.elapsed().as_micros(),
+        )
+    }
+}
+
+pub fn get_ips() -> (HashMap<(u64, u64), SocketAddr>, HashMap<u128, SocketAddr>) {
     // Read all ip addresses from a file
     let mut file = File::open("ips.txt").unwrap();
     let mut buf = String::new();
     file.read_to_string(&mut buf).unwrap();
-    let mut out = HashMap::new();
-    for l in buf.lines() {
+    let mut out = (HashMap::new(), HashMap::new());
+    for (i, l) in buf.lines().enumerate() {
         let mut it = l.split_whitespace();
         let id = (
             it.next().unwrap().parse().unwrap(),
@@ -115,7 +183,8 @@ pub fn get_ips() -> HashMap<(u64, u64), SocketAddr> {
         let ip = it.next().unwrap();
         let port = it.next().unwrap();
         let addr = format!("{}:{}", ip, port).parse::<SocketAddr>().unwrap();
-        out.insert(id, addr);
+        out.0.insert(id, addr);
+        out.1.insert(i as u128, addr);
     }
     out
 }
@@ -124,11 +193,11 @@ pub fn get_a_stream(addr: &SocketAddr) -> TcpStream {
     loop {
         match TcpStream::connect(addr) {
             Ok(x) => {
-                println!("Connected to {}", addr);
+                // println!("Connected to {}", addr);
                 break x;
             }
             Err(_) => {
-                thread::sleep(Duration::from_micros(100));
+                // thread::sleep(Duration::from_micros(100));
             }
         }
     }

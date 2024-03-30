@@ -11,6 +11,7 @@ use std::{
     time::Instant,
 };
 
+use either::Either::Left;
 use polling::{Event, Events, Poller};
 use rand::{distributions::Uniform, thread_rng};
 
@@ -25,7 +26,7 @@ pub struct MaekawaNode {
     ips: HashMap<(u64, u64), SocketAddr>,
     rx: TcpListener, // Quorum listener
     init: Instant,
-    seq: AtomicU64,
+    seq: AtomicU64, // lamport clock
 }
 
 impl MaekawaNode {
@@ -39,11 +40,7 @@ impl MaekawaNode {
         }
     }
 
-    fn request_cs(&self, streams: &Vec<TcpStream>) -> Poller {
-        for stream in streams.iter() {
-            self.send(stream, MessageType::Request);
-        }
-        self.seq.fetch_add(1, Ordering::SeqCst);
+    fn get_requester_poller(&self, streams: &Vec<TcpStream>) -> Poller {
         let poller = Poller::new().unwrap();
         streams.iter().enumerate().for_each(|(i, x)| unsafe {
             poller.add(x, Event::readable(i)).unwrap();
@@ -51,9 +48,16 @@ impl MaekawaNode {
         poller
     }
 
-    fn enter_cs(&self, streams: &mut Vec<TcpStream>, q: usize) -> Vec<LogEntry> {
+    fn request_cs(&self, streams: &Vec<TcpStream>) {
+        for stream in streams.iter() {
+            self.send(stream, MessageType::Request);
+        }
+        self.seq.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn enter_cs(&self, streams: &mut Vec<TcpStream>, poller: &Poller, q: usize) -> Vec<LogEntry> {
         // Send a request to all the nodes in the quorum
-        let poller = self.request_cs(streams);
+        self.request_cs(streams);
         // println!("Request sent");
 
         // wait for the quorum to reply
@@ -120,16 +124,16 @@ impl MaekawaNode {
         // println!("CS released");
     }
 
-    fn get_streams(&self, q: usize, ips: &HashMap<(u64, u64), SocketAddr>) -> Vec<TcpStream> {
+    fn get_streams(&self, q: usize) -> Vec<TcpStream> {
         vec![
-            vec![get_a_stream(ips.get(&(self.id.0, self.id.1)).unwrap())],
+            vec![get_a_stream(self.ips.get(&(self.id.0, self.id.1)).unwrap())],
             (0..q)
                 .filter(|&i| i != self.id.0 as usize)
-                .map(|i| get_a_stream(ips.get(&(i as u64, self.id.1)).unwrap()))
+                .map(|i| get_a_stream(self.ips.get(&(i as u64, self.id.1)).unwrap()))
                 .collect::<Vec<TcpStream>>(),
             (0..q)
                 .filter(|&i| i != self.id.1 as usize)
-                .map(|i| get_a_stream(ips.get(&(self.id.0, i as u64)).unwrap()))
+                .map(|i| get_a_stream(self.ips.get(&(self.id.0, i as u64)).unwrap()))
                 .collect::<Vec<TcpStream>>(),
         ]
         .into_iter()
@@ -145,7 +149,7 @@ impl MaekawaNode {
 
     fn log(&self, out: &mut Vec<LogEntry>, act: Action) {
         out.push(LogEntry {
-            pid: self.id,
+            pid: Left(self.id),
             ts: Instant::now(),
             act,
         });
@@ -157,14 +161,15 @@ impl MaekawaNode {
         let mut out = vec![];
 
         // All the nodes in the quorum
-        let mut streams = self.get_streams(q, &self.ips);
+        let mut streams = self.get_streams(q);
+        let poller = self.get_requester_poller(&streams);
 
         // Send a request to all the nodes in the quorum
         for _i in 0..params.k {
             self.log(&mut out, Action::Internal);
             params.sleep(u, &mut rng, Region::Out);
 
-            let replies = self.enter_cs(&mut streams, q);
+            let replies = self.enter_cs(&mut streams, &poller, q);
             out.extend(replies);
 
             self.log(&mut out, Action::Acquire);
@@ -180,7 +185,7 @@ impl MaekawaNode {
         // }
     }
 
-    fn get_quorum_poller(&self, q: usize) -> (Poller, Vec<TcpStream>) {
+    fn get_listener_poller(&self, q: usize) -> (Poller, Vec<TcpStream>) {
         let mut streams = vec![];
 
         let poller = Poller::new().unwrap();
@@ -208,7 +213,7 @@ impl MaekawaNode {
 
     fn send(&self, mut stream: &TcpStream, typ: MessageType) {
         stream
-            .write_all(&*<Message as Into<Vec<u8>>>::into(Message::new(
+            .write_all(&*<Message as Into<Vec<u8>>>::into(Message::new_maekawa(
                 self.id,
                 typ,
                 self.seq.load(Ordering::SeqCst) as u128,
@@ -239,6 +244,7 @@ impl MaekawaNode {
                             match msg.typ {
                                 MessageType::Request => {
                                     self.log(&mut out, Action::Query(msg.id));
+                                    // Lamport clock
                                     if msg.ts > self.seq.load(Ordering::SeqCst) as u128 {
                                         self.seq.store((msg.ts + 1) as u64, Ordering::SeqCst);
                                     }
@@ -256,10 +262,18 @@ impl MaekawaNode {
                                         }
 
                                         // Need to put in queue anyway.
-                                        req.push(Request::new(msg.ts, msg.id, stream));
+                                        req.push(Request::new(
+                                            msg.ts,
+                                            msg.id.expect_left(""),
+                                            stream,
+                                        ));
                                         // println!("Request queued: {:#?}", msg.id);
                                     } else {
-                                        locked = Some(Request::new(msg.ts, msg.id, stream));
+                                        locked = Some(Request::new(
+                                            msg.ts,
+                                            msg.id.expect_left(""),
+                                            stream,
+                                        ));
                                         self.log(&mut out, Action::Grant(msg.id));
                                         inq = false;
                                         self.send(stream, MessageType::Reply);
@@ -286,7 +300,7 @@ impl MaekawaNode {
                                 MessageType::Yield => {
                                     // self.send(stream, MessageType::Reply);
                                     match locked {
-                                        Some(ref t) if t.pid == msg.id => {
+                                        Some(ref t) if t.pid == msg.id.expect_left("") => {
                                             if req.is_empty() {
                                                 // dbg!(msg);
                                                 panic!("Bad yield.");
@@ -332,16 +346,16 @@ impl MaekawaNode {
     }
 
     /// Listen for incoming messages
-    fn quorum_thread(&self, q: usize) -> Vec<LogEntry> {
-        let (poller, streams) = self.get_quorum_poller(q);
+    fn listener_thread(&self, q: usize) -> Vec<LogEntry> {
+        let (poller, streams) = self.get_listener_poller(q);
 
         // println!("Quorum ready: {}", streams.len());
 
         self.listen(poller, &streams, q)
     }
 
-    fn quorum_spawn(self: Arc<Self>, q: usize) -> JoinHandle<Vec<LogEntry>> {
-        thread::spawn(move || self.quorum_thread(q))
+    fn listener_spawn(self: Arc<Self>, q: usize) -> JoinHandle<Vec<LogEntry>> {
+        thread::spawn(move || self.listener_thread(q))
     }
 
     fn requester_spawn(self: Arc<Self>, params: Params, q: usize) -> JoinHandle<Vec<LogEntry>> {
@@ -349,26 +363,27 @@ impl MaekawaNode {
     }
 
     pub fn spawn(self: Arc<Self>, params: Params) {
-        let mut file = File::create(format!("log/node_{}_{}.log", self.id.0, self.id.1)).unwrap();
+        let mut file =
+            File::create(format!("log/maekawa/node_{}_{}.log", self.id.0, self.id.1)).unwrap();
         let q = (params.n as f64).sqrt() as usize;
 
         // let init = Instant::now();
         // Spawn a new thread to listen for incoming messages
-        let quorum = self.clone().quorum_spawn(q);
+        let listener = self.clone().listener_spawn(q);
 
         // Spawn a new thread to request CS.
         let node = self.clone().requester_spawn(params, q);
 
         // Wait for the threads to finish
-        let quorum_log = quorum.join().unwrap();
+        let listener_log = listener.join().unwrap();
         let node_log = node.join().unwrap();
 
-        let mut log = [quorum_log, node_log].concat();
+        let mut log = [listener_log, node_log].concat();
         log.sort_by_key(|x| x.ts);
 
         // TODO: Make a new display function for LogEntry
         for entry in log.iter() {
-            writeln!(file, "{:?}", entry).unwrap();
+            writeln!(file, "{}", entry).unwrap();
         }
     }
 }
