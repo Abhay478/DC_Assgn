@@ -21,12 +21,21 @@ use crate::{
     Params, Region,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestStatus {
+    Pending,
+    Granted,
+    Inquiring,
+    Failed,
+}
+
 pub struct MaekawaNode {
     id: (u64, u64), // grid coordinates
     ips: HashMap<(u64, u64), SocketAddr>,
     rx: TcpListener, // Quorum listener
-    init: Instant,
+    pub init: Instant,
     seq: AtomicU64, // lamport clock
+    pub mc: AtomicU64,
 }
 
 impl MaekawaNode {
@@ -37,7 +46,29 @@ impl MaekawaNode {
             ips,
             init: Instant::now(),
             seq: 0.into(),
+            mc: 0.into(),
         }
+    }
+
+    /// Sends messages
+    fn send(&self, mut stream: &TcpStream, typ: MessageType) {
+        self.mc.fetch_add(1, Ordering::SeqCst);
+        stream
+            .write_all(&*<Message as Into<Vec<u8>>>::into(Message::new_maekawa(
+                self.id,
+                typ,
+                self.seq.load(Ordering::SeqCst) as u128,
+            )))
+            .unwrap();
+    }
+
+    /// Generates log entries
+    fn log(&self, out: &mut Vec<LogEntry>, act: Action) {
+        out.push(LogEntry {
+            pid: Left(self.id),
+            ts: self.init.elapsed().as_millis(),
+            act,
+        });
     }
 
     fn get_requester_poller(&self, streams: &Vec<TcpStream>) -> Poller {
@@ -48,6 +79,7 @@ impl MaekawaNode {
         poller
     }
 
+    /// Send request to all endpoints in the quorum
     fn request_cs(&self, streams: &Vec<TcpStream>) {
         for stream in streams.iter() {
             self.send(stream, MessageType::Request);
@@ -55,24 +87,23 @@ impl MaekawaNode {
         self.seq.fetch_add(1, Ordering::SeqCst);
     }
 
+    /// Wait for quorum replies
     fn enter_cs(&self, streams: &mut Vec<TcpStream>, poller: &Poller, q: usize) -> Vec<LogEntry> {
         // Send a request to all the nodes in the quorum
         self.request_cs(streams);
-        // println!("Request sent");
+        println!("Request sent");
 
         // wait for the quorum to reply
-        let mut replies = 0;
-        let mut failed = false;
         let mut out = vec![];
-        let mut inqs = vec![];
+        let mut status = vec![RequestStatus::Pending; 2 * q - 1];
 
         let mut events = Events::new();
-        while replies < 2 * q - 1 {
+        while status.contains(&RequestStatus::Pending) || status.contains(&RequestStatus::Failed) {
             events.clear();
             poller.wait(&mut events, None).unwrap();
 
             for ev in events.iter() {
-                let stream = streams.get_mut(ev.key).unwrap();
+                let mut stream = streams.get(ev.key).unwrap();
                 let mut buf = [0; 1024];
                 match stream.read(&mut buf) {
                     Ok(ref b) if *b > 0 => {
@@ -80,22 +111,30 @@ impl MaekawaNode {
                         match msg.typ {
                             MessageType::Reply => {
                                 // println!("Reply: {:#?}", msg.id);
-                                replies += 1;
+                                status[ev.key] = RequestStatus::Granted;
                                 self.log(&mut out, Action::Reply(msg.id));
                             }
                             MessageType::Failed => {
                                 // println!("Failed {:#?}", msg.id);
-                                failed = true;
-                                for stream in inqs.iter() {
-                                    self.send(stream, MessageType::Yield);
+                                status[ev.key] = RequestStatus::Failed;
+                                for (ss, stat) in streams
+                                    .iter()
+                                    .zip(status.iter_mut())
+                                    .filter(|x| x.1 == &RequestStatus::Inquiring)
+                                {
+                                    self.send(ss, MessageType::Yield);
+                                    *stat = RequestStatus::Pending;
                                 }
                             }
                             MessageType::Inquire => {
                                 // println!("Inquire {:#?}.", msg.id);
-                                if failed {
+                                if status.contains(&RequestStatus::Failed)
+                                    && status[ev.key] != RequestStatus::Inquiring
+                                {
                                     self.send(stream, MessageType::Yield);
+                                    status[ev.key] = RequestStatus::Pending;
                                 } else {
-                                    inqs.push(stream.try_clone().expect("Clone failed."));
+                                    status[ev.key] = RequestStatus::Inquiring;
                                 }
                             }
                             _ => {
@@ -112,18 +151,20 @@ impl MaekawaNode {
             }
         }
 
-        // println!("CS acquired");
+        println!("CS acquired");
 
         out
     }
 
+    /// Send release to all endpoints in the quorum
     fn exit_cs(&self, streams: &Vec<TcpStream>) {
         for stream in streams.iter() {
             self.send(stream, MessageType::Release);
         }
-        // println!("CS released");
+        println!("CS released");
     }
 
+    /// Get the streams for the quorum
     fn get_streams(&self, q: usize) -> Vec<TcpStream> {
         vec![
             vec![get_a_stream(self.ips.get(&(self.id.0, self.id.1)).unwrap())],
@@ -141,20 +182,15 @@ impl MaekawaNode {
         .collect::<Vec<TcpStream>>()
     }
 
-    fn terminate(&self, streams: &Vec<TcpStream>) {
-        for stream in streams.iter() {
+    /// Indicates alggorithm termination
+    fn terminate(&self, streams: &mut Vec<TcpStream>) {
+        for stream in streams.iter_mut() {
             self.send(stream, MessageType::Terminate);
+            // stream.flush().unwrap();
         }
     }
 
-    fn log(&self, out: &mut Vec<LogEntry>, act: Action) {
-        out.push(LogEntry {
-            pid: Left(self.id),
-            ts: Instant::now(),
-            act,
-        });
-    }
-
+    /// Simulate CS requests
     fn requester_thread(&self, params: &Params, q: usize) -> Vec<LogEntry> {
         let mut rng = thread_rng();
         let u = Uniform::new(0.0, 1.0);
@@ -180,9 +216,13 @@ impl MaekawaNode {
         }
 
         self.terminate(&mut streams);
+        println!("Node {:?} sent terminate.", self.id);
 
         out
-        // }
+    }
+
+    fn requester_spawn(self: Arc<Self>, params: Params, q: usize) -> JoinHandle<Vec<LogEntry>> {
+        thread::spawn(move || self.requester_thread(&params, q))
     }
 
     fn get_listener_poller(&self, q: usize) -> (Poller, Vec<TcpStream>) {
@@ -190,7 +230,6 @@ impl MaekawaNode {
 
         let poller = Poller::new().unwrap();
         for stream in self.rx.incoming() {
-            // println!("-");
             match stream {
                 Ok(x) => {
                     unsafe { poller.add(&x, Event::readable(streams.len())).unwrap() };
@@ -211,18 +250,8 @@ impl MaekawaNode {
         (poller, streams)
     }
 
-    fn send(&self, mut stream: &TcpStream, typ: MessageType) {
-        stream
-            .write_all(&*<Message as Into<Vec<u8>>>::into(Message::new_maekawa(
-                self.id,
-                typ,
-                self.seq.load(Ordering::SeqCst) as u128,
-            )))
-            .unwrap();
-    }
-
+    /// Listen for incoming messages
     fn listen(&self, poller: Poller, streams: &Vec<TcpStream>, q: usize) -> Vec<LogEntry> {
-        // let mut req = vec![];
         let mut req = BinaryHeap::new();
         let mut locked: Option<Request> = None;
         let mut inq = false; // Have we sent an inquire message already?
@@ -298,12 +327,15 @@ impl MaekawaNode {
                                     }
                                 }
                                 MessageType::Yield => {
-                                    // self.send(stream, MessageType::Reply);
+                                    self.send(stream, MessageType::Reply);
                                     match locked {
                                         Some(ref t) if t.pid == msg.id.expect_left("") => {
                                             if req.is_empty() {
-                                                // dbg!(msg);
-                                                panic!("Bad yield.");
+                                                if msg.ts < self.seq.load(Ordering::SeqCst) as u128
+                                                {
+                                                    dbg!(msg);
+                                                    panic!("Bad yield to {:#?}.", self.id);
+                                                }
                                             } else {
                                                 // println!("Yielded: {:#?}", msg.id);
                                                 let next = req.pop().unwrap();
@@ -318,12 +350,21 @@ impl MaekawaNode {
                                             panic!("Yielding when locked empty.");
                                         }
                                         _ => {
-                                            // println!("Heh?");
+                                            if msg.ts < locked.unwrap().ts {
+                                                dbg!(msg);
+                                                dbg!(&locked);
+                                                panic!("Weird yield to {:#?}.", self.id);
+                                            }
                                         } // Old yield?
                                     }
                                 }
                                 MessageType::Terminate => {
                                     term += 1;
+                                    println!(
+                                        "Node {:?} received terminate from {:?}.",
+                                        self.id,
+                                        msg.id.expect_left("")
+                                    );
                                 }
                                 _ => {
                                     panic!("Unexpected message")
@@ -345,11 +386,10 @@ impl MaekawaNode {
         out
     }
 
-    /// Listen for incoming messages
     fn listener_thread(&self, q: usize) -> Vec<LogEntry> {
         let (poller, streams) = self.get_listener_poller(q);
 
-        // println!("Quorum ready: {}", streams.len());
+        println!("Quorum ready: {}", streams.len());
 
         self.listen(poller, &streams, q)
     }
@@ -358,21 +398,19 @@ impl MaekawaNode {
         thread::spawn(move || self.listener_thread(q))
     }
 
-    fn requester_spawn(self: Arc<Self>, params: Params, q: usize) -> JoinHandle<Vec<LogEntry>> {
-        thread::spawn(move || self.requester_thread(&params, q))
-    }
-
+    /// Initiates node execution
     pub fn spawn(self: Arc<Self>, params: Params) {
         let mut file =
             File::create(format!("log/maekawa/node_{}_{}.log", self.id.0, self.id.1)).unwrap();
         let q = (params.n as f64).sqrt() as usize;
 
-        // let init = Instant::now();
         // Spawn a new thread to listen for incoming messages
         let listener = self.clone().listener_spawn(q);
+        // println!("Listener spawned.");
 
         // Spawn a new thread to request CS.
         let node = self.clone().requester_spawn(params, q);
+        // println!("Requester spawned.");
 
         // Wait for the threads to finish
         let listener_log = listener.join().unwrap();

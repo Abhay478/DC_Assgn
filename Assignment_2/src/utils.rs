@@ -5,7 +5,6 @@ use std::{
     io::Read,
     mem,
     net::{SocketAddr, TcpStream},
-    time::Instant,
 };
 
 use either::Either::{self, Left, Right};
@@ -134,7 +133,7 @@ impl From<&[u8]> for Message {
             5 => MessageType::Inquire,
             6 => MessageType::Yield,
             7 => MessageType::Terminate,
-            _ => unreachable!(),
+            _ => unreachable!("{}", x[16]),
         };
         Self {
             id: Left(id),
@@ -148,7 +147,7 @@ impl From<&[u8]> for Message {
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub pid: Either<(u64, u64), u128>,
-    pub ts: Instant,
+    pub ts: u128,
     pub act: Action,
 }
 
@@ -158,13 +157,7 @@ impl Display for LogEntry {
             Left(x) => format!("{:?}", x),
             Right(x) => format!("{:?}", x),
         };
-        write!(
-            f,
-            "Process {:?} {} at time {:?}",
-            pid,
-            self.act,
-            self.ts.elapsed().as_micros(),
-        )
+        write!(f, "Process {:?} {} at time {:?}", pid, self.act, self.ts,)
     }
 }
 

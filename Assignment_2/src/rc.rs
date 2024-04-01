@@ -24,8 +24,9 @@ pub struct RCNode {
     id: u128,
     ips: HashMap<u128, SocketAddr>,
     rx: TcpListener, // Listener
-    init: Instant,
+    pub init: Instant,
     seq: AtomicU64,
+    pub mc: AtomicU64,
     req_flag: AtomicBool,
     quorum: Mutex<HashMap<u128, (bool, Option<TcpStream>)>>,
 }
@@ -49,6 +50,7 @@ impl RCNode {
             seq: 0.into(),
             req_flag: false.into(),
             quorum,
+            mc: 0.into(),
         }
     }
 
@@ -77,12 +79,13 @@ impl RCNode {
     fn log(&self, out: &mut Vec<LogEntry>, act: Action) {
         out.push(LogEntry {
             pid: Right(self.id),
-            ts: Instant::now(),
+            ts: self.init.elapsed().as_micros(),
             act,
         });
     }
 
     fn send(&self, mut stream: &TcpStream, typ: MessageType) {
+        self.mc.fetch_add(1, Ordering::SeqCst);
         stream
             .write_all(&*<Message as Into<Vec<u8>>>::into(Message::new_rc(
                 self.id,
@@ -126,7 +129,7 @@ impl RCNode {
     fn enter_cs(&self, streams: &mut Vec<(u128, TcpStream)>, poller: &Poller) -> Vec<LogEntry> {
         // Send a request to all the nodes in the quorum
         let c = self.request_cs(streams);
-        println!("Request sent: {c}");
+        // println!("Request sent: {c}");
 
         // wait for the quorum to reply
         let mut replies = 0;
@@ -168,7 +171,7 @@ impl RCNode {
             x.1 .0 = false;
         }
 
-        println!("CS acquired");
+        // println!("CS acquired");
 
         out
     }
@@ -176,15 +179,13 @@ impl RCNode {
     fn exit_cs(&self) {
         self.req_flag.store(false, Ordering::SeqCst);
         let mut q = self.quorum.lock().unwrap();
-        let mut c = 0;
         for (_, maybe) in q.iter_mut() {
             if let Some(out) = &maybe.1 {
-                c += 1;
                 self.send(out, MessageType::Reply);
                 maybe.1 = None;
             }
         }
-        println!("CS exited: {c}");
+        // println!("CS exited: {c}");
         // todo!()
     }
 
@@ -220,29 +221,15 @@ impl RCNode {
                                         self.seq.store((msg.ts + 1) as u64, Ordering::SeqCst);
 
                                         // Unfulfilled request
-                                        self.quorum
-                                            .lock()
-                                            .unwrap()
-                                            .get_mut(&id)
-                                            .unwrap()
-                                            .1 = Some(stream.try_clone().unwrap());
+                                        self.quorum.lock().unwrap().get_mut(&id).unwrap().1 =
+                                            Some(stream.try_clone().unwrap());
                                     } else if self.req_flag.load(Ordering::SeqCst) {
                                         // Request is queued
                                         self.send(stream, MessageType::Reply);
-                                        self.quorum
-                                            .lock()
-                                            .unwrap()
-                                            .get_mut(&id)
-                                            .unwrap()
-                                            .0 = true;
+                                        self.quorum.lock().unwrap().get_mut(&id).unwrap().0 = true;
                                     } else {
                                         self.send(stream, MessageType::Reply);
-                                        self.quorum
-                                            .lock()
-                                            .unwrap()
-                                            .get_mut(&id)
-                                            .unwrap()
-                                            .0 = true;
+                                        self.quorum.lock().unwrap().get_mut(&id).unwrap().0 = true;
                                     }
                                 }
                                 MessageType::Reply => {
@@ -335,6 +322,8 @@ impl RCNode {
         let listener = self.clone().listener_spawn(params);
 
         let streams = self.clone().get_all_streams(&params);
+
+        println!("Connections established.");
 
         // Spawn a new thread to request CS.
         let node = self.clone().requester_spawn(params, streams);

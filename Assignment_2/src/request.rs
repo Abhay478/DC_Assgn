@@ -1,5 +1,6 @@
 use std::net::TcpStream;
 
+#[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     pub ts: u128,
     pub pid: (u64, u64),
