@@ -208,7 +208,7 @@ impl RCNode {
                 let mut buf = [0; 128];
                 match stream.read(&mut buf) {
                     Ok(ref b) if *b > 0 => {
-                        let msgs = get_msgs(&buf, b);
+                        let msgs = get_msgs(&mut buf, b);
 
                         for mut msg in msgs {
                             msg.flip();

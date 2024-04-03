@@ -196,10 +196,13 @@ pub fn get_a_stream(addr: &SocketAddr) -> TcpStream {
     }
 }
 
-pub fn get_msgs(buf: &[u8], b: &usize) -> Vec<Message> {
+pub fn get_msgs(buf: &mut [u8], b: &usize) -> Vec<Message> {
     let msgsz = 33;
     let msgc = *b / msgsz;
-    (0..msgc)
+    let out = (0..msgc)
         .map(|i| Message::from(&buf[i * msgsz..(i + 1) * msgsz]))
-        .collect::<Vec<Message>>()
+        .collect::<Vec<Message>>();
+    buf.fill(0);
+    dbg!(&out);
+    out
 }

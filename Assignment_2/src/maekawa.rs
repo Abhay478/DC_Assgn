@@ -8,7 +8,7 @@ use std::{
         Arc,
     },
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use either::Either::Left;
@@ -60,6 +60,7 @@ impl MaekawaNode {
                 self.seq.load(Ordering::SeqCst) as u128,
             )))
             .unwrap();
+        stream.flush().unwrap();
     }
 
     /// Generates log entries
@@ -93,10 +94,10 @@ impl MaekawaNode {
         self.request_cs(streams);
         println!("Request sent");
 
-        // wait for the quorum to reply
         let mut out = vec![];
         let mut status = vec![RequestStatus::Pending; 2 * q - 1];
-
+        
+        // wait for the quorum to reply
         let mut events = Events::new();
         while status.contains(&RequestStatus::Pending) || status.contains(&RequestStatus::Failed) {
             events.clear();
@@ -107,43 +108,67 @@ impl MaekawaNode {
                 let mut buf = [0; 1024];
                 match stream.read(&mut buf) {
                     Ok(ref b) if *b > 0 => {
-                        let msg = Message::from(&buf[..*b]);
-                        match msg.typ {
-                            MessageType::Reply => {
-                                // println!("Reply: {:#?}", msg.id);
-                                status[ev.key] = RequestStatus::Granted;
-                                self.log(&mut out, Action::Reply(msg.id));
-                            }
-                            MessageType::Failed => {
-                                // println!("Failed {:#?}", msg.id);
-                                status[ev.key] = RequestStatus::Failed;
-                                for (ss, stat) in streams
-                                    .iter()
-                                    .zip(status.iter_mut())
-                                    .filter(|x| x.1 == &RequestStatus::Inquiring)
-                                {
-                                    self.send(ss, MessageType::Yield);
-                                    *stat = RequestStatus::Pending;
+                        // let msg = Message::from(&buf[..*b]);
+                        let msgs = get_msgs(&mut buf, b);
+                        for msg in msgs {
+                            match msg.typ {
+                                MessageType::Reply => {
+                                    println!("Reply: {:#?}", msg);
+                                    if status[ev.key] == RequestStatus::Granted {
+                                        panic!("Duplicate reply");
+                                        // continue;
+                                    }
+                                    status[ev.key] = RequestStatus::Granted;
+                                    self.log(&mut out, Action::Reply(msg.id));
                                 }
-                            }
-                            MessageType::Inquire => {
-                                // println!("Inquire {:#?}.", msg.id);
-                                if status.contains(&RequestStatus::Failed)
-                                    && status[ev.key] != RequestStatus::Inquiring
-                                {
-                                    self.send(stream, MessageType::Yield);
-                                    status[ev.key] = RequestStatus::Pending;
-                                } else {
-                                    status[ev.key] = RequestStatus::Inquiring;
+                                MessageType::Failed => {
+                                    println!("Failed: {:#?}", msg);
+                                    if status[ev.key] == RequestStatus::Failed {
+                                        panic!("Duplicate fail");
+                                        // continue;
+                                    }
+                                    status[ev.key] = RequestStatus::Failed;
+                                    for (ss, stat) in streams
+                                        .iter()
+                                        .zip(status.iter_mut())
+                                        .filter(|x| x.1 == &RequestStatus::Inquiring)
+                                    {
+                                        self.send(ss, MessageType::Yield);
+                                        *stat = RequestStatus::Pending;
+                                    }
                                 }
-                            }
-                            _ => {
-                                panic!("Unexpected message")
+                                MessageType::Inquire => {
+                                    println!("Inquire received: {:#?}.", msg);
+                                    if status[ev.key] == RequestStatus::Failed {
+                                        // panic!("Inquire from failed.");
+                                        continue;
+                                    }
+                                    if status[ev.key] == RequestStatus::Pending {
+                                        // panic!("Orphan inquire.");
+                                        continue;
+                                    }
+                                    if status[ev.key] == RequestStatus::Inquiring {
+                                        panic!("Duplicate inquire.");
+                                        // continue;
+                                    }
+                                    if status.contains(&RequestStatus::Failed)
+                                        && status[ev.key] != RequestStatus::Inquiring
+                                    {
+                                        self.send(stream, MessageType::Yield);
+                                        println!("Yield sent {:#?}", msg);
+                                        status[ev.key] = RequestStatus::Pending;
+                                    } else {
+                                        status[ev.key] = RequestStatus::Inquiring;
+                                    }
+                                }
+                                _ => {
+                                    panic!("Unexpected message")
+                                }
                             }
                         }
                     }
                     _ => {
-                        // thread::sleep(Duration::from_micros(10));
+                        thread::sleep(Duration::from_micros(10));
                     }
                 }
                 buf.fill(0);
@@ -170,11 +195,23 @@ impl MaekawaNode {
             vec![get_a_stream(self.ips.get(&(self.id.0, self.id.1)).unwrap())],
             (0..q)
                 .filter(|&i| i != self.id.0 as usize)
-                .map(|i| get_a_stream(self.ips.get(&(i as u64, self.id.1)).unwrap()))
+                .map(|i| {
+                    get_a_stream(
+                        self.ips
+                            .get(&(i as u64, self.id.1)).unwrap()
+                            // .expect(&format!("{:#?}", (i as u64, self.id.1))),
+                    )
+                })
                 .collect::<Vec<TcpStream>>(),
             (0..q)
                 .filter(|&i| i != self.id.1 as usize)
-                .map(|i| get_a_stream(self.ips.get(&(self.id.0, i as u64)).unwrap()))
+                .map(|i| {
+                    get_a_stream(
+                        self.ips
+                            .get(&(self.id.0, i as u64)).unwrap()
+                            // .expect(&format!("{:#?}", (self.id.0, i as u64))),
+                    )
+                })
                 .collect::<Vec<TcpStream>>(),
         ]
         .into_iter()
@@ -182,11 +219,11 @@ impl MaekawaNode {
         .collect::<Vec<TcpStream>>()
     }
 
-    /// Indicates alggorithm termination
+    /// Indicates algorithm termination
     fn terminate(&self, streams: &mut Vec<TcpStream>) {
         for stream in streams.iter_mut() {
             self.send(stream, MessageType::Terminate);
-            // stream.flush().unwrap();
+            stream.flush().unwrap();
         }
     }
 
@@ -199,6 +236,8 @@ impl MaekawaNode {
         // All the nodes in the quorum
         let mut streams = self.get_streams(q);
         let poller = self.get_requester_poller(&streams);
+        // dbg!(&streams);
+        println!("Streams: {:#?}", streams);
 
         // Send a request to all the nodes in the quorum
         for _i in 0..params.k {
@@ -230,11 +269,11 @@ impl MaekawaNode {
 
         let poller = Poller::new().unwrap();
         for stream in self.rx.incoming() {
+            println!("Incoming : {:#?}", stream);
             match stream {
                 Ok(x) => {
                     unsafe { poller.add(&x, Event::readable(streams.len())).unwrap() };
                     streams.push(x);
-                    // println!("New connection.");
                 }
                 Err(_) => {
                     // thread::sleep(Duration::from_micros(10));
@@ -267,18 +306,40 @@ impl MaekawaNode {
                 let mut buf = [0; 128];
                 match stream.read(&mut buf) {
                     Ok(ref b) if *b > 0 => {
-                        let msgs = get_msgs(&buf, b);
-
+                        let msgs = get_msgs(&mut buf, b);
+                        buf.fill(0);
                         for msg in msgs {
                             match msg.typ {
                                 MessageType::Request => {
+                                    // dbg!(&msg);
+                                    let new_req = Request::new(
+                                        msg.ts,
+                                        msg.id.expect_left(""),
+                                        stream,
+                                    );
+                                    // if req.iter().any(|x| *x == new_req) {
+                                    //     panic!("Duplicate request: {:#?}, {:#?}.", *x, msg);
+                                    //     // continue;
+                                    // }
+                                    req.iter().for_each(|x| {
+                                        if *x == new_req {
+                                            panic!("Duplicate request: {:#?}, {:#?}.", *x, new_req);
+                                            // continue;
+                                        }
+                                    });
                                     self.log(&mut out, Action::Query(msg.id));
                                     // Lamport clock
                                     if msg.ts > self.seq.load(Ordering::SeqCst) as u128 {
                                         self.seq.store((msg.ts + 1) as u64, Ordering::SeqCst);
                                     }
                                     if let Some(ref t) = locked {
-                                        if msg.ts > t.ts
+                                        if *t == new_req {
+                                            panic!("Duplicate request: {:#?} {:#?}.", *t, new_req);
+                                            // continue;
+                                        }
+                                        if msg.ts == t.ts && msg.id.expect_left("") < t.pid {
+                                            self.send(stream, MessageType::Failed);
+                                        } else if msg.ts > t.ts
                                             || req.iter().fold(false, |acc, x: &Request| {
                                                 acc || x.ts < msg.ts
                                             })
@@ -291,22 +352,15 @@ impl MaekawaNode {
                                         }
 
                                         // Need to put in queue anyway.
-                                        req.push(Request::new(
-                                            msg.ts,
-                                            msg.id.expect_left(""),
-                                            stream,
-                                        ));
-                                        // println!("Request queued: {:#?}", msg.id);
+                                        req.push(new_req);
+                                        dbg!(&req);
+                                        println!("Request queued: {:#?}", msg.id);
                                     } else {
-                                        locked = Some(Request::new(
-                                            msg.ts,
-                                            msg.id.expect_left(""),
-                                            stream,
-                                        ));
+                                        locked = Some(new_req);
                                         self.log(&mut out, Action::Grant(msg.id));
                                         inq = false;
                                         self.send(stream, MessageType::Reply);
-                                        // println!("Grant sent {:#?}", msg.id);
+                                        println!("Grant sent {:#?}", msg.id);
                                     }
                                 }
                                 MessageType::Release => {
@@ -320,16 +374,20 @@ impl MaekawaNode {
                                         locked = None;
                                     } else {
                                         let next = req.pop().unwrap();
-                                        // println!("Grant: {:#?}", next.pid);
+                                        println!("Grant sent: {:#?}", next.pid);
                                         self.log(&mut out, Action::Grant(msg.id));
                                         self.send(next.stream, MessageType::Reply);
                                         locked = Some(next);
                                     }
                                 }
                                 MessageType::Yield => {
-                                    self.send(stream, MessageType::Reply);
+                                    dbg!(&req);
+                                    dbg!(&locked);
+                                    dbg!(&msg);
+                                    inq = false;
                                     match locked {
                                         Some(ref t) if t.pid == msg.id.expect_left("") => {
+                                            
                                             if req.is_empty() {
                                                 if msg.ts < self.seq.load(Ordering::SeqCst) as u128
                                                 {
@@ -337,10 +395,10 @@ impl MaekawaNode {
                                                     panic!("Bad yield to {:#?}.", self.id);
                                                 }
                                             } else {
-                                                // println!("Yielded: {:#?}", msg.id);
+                                                println!("Yield received: {:#?}", msg.id);
                                                 let next = req.pop().unwrap();
                                                 req.push(locked.take().unwrap());
-                                                // println!("Grant: {:#?}", next.pid);
+                                                println!("Grant sent: {:#?}", next.pid);
                                                 self.log(&mut out, Action::Grant(msg.id));
                                                 self.send(next.stream, MessageType::Reply);
                                                 locked = Some(next);
@@ -406,11 +464,9 @@ impl MaekawaNode {
 
         // Spawn a new thread to listen for incoming messages
         let listener = self.clone().listener_spawn(q);
-        // println!("Listener spawned.");
 
         // Spawn a new thread to request CS.
         let node = self.clone().requester_spawn(params, q);
-        // println!("Requester spawned.");
 
         // Wait for the threads to finish
         let listener_log = listener.join().unwrap();
